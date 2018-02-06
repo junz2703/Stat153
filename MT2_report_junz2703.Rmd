@@ -1,0 +1,570 @@
+---
+title: "MT2_Report"
+author: "(23074461)"
+date: "11/16/2017"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+# Introduction
+
+This Report is about forcasting with the dataset q5_train.csv. This is a google-trends like data for queries from the first week of January 2004 to the second week of March 2015 (total of 584 weeks). In this report, we attempt to predict the next 104 observations(2 years) of this time series. We would do so by fitting a SARIMA model to the data. 
+The outline of this report is as follows: 
+first, start with an exploratory data analysis to get rid of any secular trends and seasonality in the data; Then evaluate of the ACF & PACF of the transformed and differenced data. After assessment, come up with a set of possible SARIMA models and select a single best model based on AIC and cross validation. After producing predictions with this best model, we finish with a basic diagnostic of our model. 
+
+# Exploratory Data Analysis
+```{r,echo=FALSE}
+setwd("/Users/hyung/documents/R/Data/Class/Stat153/MT2")
+q5 <- read.csv(file = "q5_train.csv", header = TRUE)
+plot.ts(q5$activity, ylab = "Activity", main = "Q5 Raw Data")
+abline(v = 52*(1:11), col = "yellow")
+```
+
+First we attempt to analyze a time series by plotting the original data to see if there is any possible structure. From the plot of this time series, we can see...
+
+1) Seasonal feature: Same patterns seem to repeat every 52 data points. This can be interpreted as the data have a yearly seasonal trend (1 year = 52 weeks). Vertical lines(yellow) are added at multiples of 52.
+
+2) Overall quadratic trend: There exists a general quadratic trend discernable by a slight parabolic shape.
+
+We decided to use seasonal (with lag 52) and non-seasonal differencing method to address two observations.
+
+```{r,echo=FALSE}
+q5_diff <- diff(diff(diff(q5$activity)), lag = 52)
+plot.ts(q5_diff, ylab = "Activity", main = "Q5 Thrice Differenced Data")
+abline(h = 0, col = "red")
+```
+
+The differenced data looks stationary, showing mean zero feature. Thus, this differenced data can be used for further analysis. We examine the autocovariance and partial autocovariance plots of the differenced data for more insights.
+
+# Examination of ACF & PACF of Differenced Data
+```{r, echo=FALSE}
+par(mfrow = c(2,1))
+acf(q5_diff, lag.max = 250, main = "ACF of Differenced Data")
+abline(v = c(52,104,156,208), lty = 3, col = "red")
+pacf(q5_diff, lag.max = 250, main = "PACF of Differenced Data")
+abline(v = c(52,104,156,208), lty = 3, col = "red")
+```
+
+Two observations can be made:
+\newline 1) Locally: acf has one significant spike at lag 1, while pacf tails off after few lags.
+\newline 2) Seasonally: the structure does not seem complicated, as significant spikes only be observed at the period of 52 in both acf and pacf. However, the spike in pacf seems to be 1 lag off, which is plausible for a seasonal lag.
+
+
+# Model Selection
+
+With these observations, we start fitting simple seasonal ARIMA models. The local structure of acf and pacf suggests this may have MA(1) process component. For seasonal structure, significant spikes are observed only at the very first seasonal lag for both acf and pacf, we can eliminate AR(1) (no dying off structure in acf) and will start fitting with MA(1).
+
+Thus we fit **$ARIMA(0, 2, 1) x (0, 1, 1)_{52}$** for the first attempt.
+
+```{r,echo=FALSE}
+q5_fit_1st <- arima(q5$activity, order = c(0, 2, 1), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+par(mfrow = c(2,1))
+acf(q5_fit_1st$residuals, lag.max = 200, main = "ACF of Residuals")
+pacf(q5_fit_1st$residuals, lag.max = 200, main = "PACF of Residuals")
+```
+
+As can be seen in the above two plots, residuals from fitting $ARIMA(0, 2, 1) x (0, 1, 1)_{52}$ model still contains some structure, suggesting there may be a better model.
+
+Thus we fix the seasonal part and try to fit different non-seasonal parameters.  Based on the assessment of acf and pacf of the data and our first model, we will limit AR component up to 4, and MA component up to 2, and will apply all possible models within this range. In this analysis, we will use AIC and Cross-Validation to validate models.
+
+Given limited amount of computational power, we'll use a simple Cross-Validation algorithm. We assign the first 75% of known data to the training set, and the rest 25% to the test set. Fit models on the training set, then predict the test set with those models. Sum of Squared Errors (SSE) will be computed to specify the accuracy of the prediction, which will be compared across models, and a model with lowest SSE will be selected.
+
+The following is the matrix of AIC statistics for potential models with the seasonal component fixed at (0,1,1).
+```{r, echo = FALSE}
+ReturnAIC <- function(data, p, d, q, P, D, Q){
+  model <- as.list(tryCatch(arima(data, order = c(p,d,q), seasonal = list(order = c(P,D,Q), period = 52), method = "CSS-ML")
+                            , error = function(e){NA}
+  ))
+  if(is.na(model[1])){
+    return(NA)
+  }else{
+    return(model$aic)
+  }
+}
+
+AIC_Matrix <- function(data, ar, d, ma, P, D, Q){
+  aic_matrix <- sapply(ma, function(q){ 
+    sapply(ar, function(p){
+      ReturnAIC(data,p,d,q,P,D,Q) 
+      })})
+  colnames(aic_matrix) <- paste0("MA", "(", ma, ")")
+  rownames(aic_matrix) <- paste0("AR", "(", ar, ")")
+  return(aic_matrix)
+}
+
+AIC_Matrix_Seasonal <- function(data, p, d, q, AR, D, MA){
+  aic.matrix <- sapply(MA, function(Q){
+                  sapply(AR, function(P){
+                    ReturnAIC(data,p,d,q,P,D,Q)
+                })})
+  colnames(aic.matrix) <- paste0("Seasonal MA", "(", MA, ")")
+  rownames(aic.matrix) <- paste0("Seasonal AR", "(", AR, ")")
+  return(aic.matrix)
+}
+# aic matrix of different models w/ same seasonal component
+case1 <- AIC_Matrix(data = q5$activity, 0:4,2,1:2,0,1,1)
+case1
+```
+
+Repeating the above process, varying the seasonal component.
+
+```{r, echo = FALSE, warning=FALSE}
+case2 <- AIC_Matrix(data = q5$activity, 0:4,2,1:2,1,1,0)
+case3 <- AIC_Matrix(data = q5$activity, 0:4,2,1:2,1,1,1)
+case2
+case3
+```
+
+Of the 3 AIC matrices, the first has the seasonal component fixed at (0,1,1), second at (1,1,0), and the third at (1,1,1).  On average, models with the seasonal component (0,1,1) seem to produce the lowest AIC. We will then fix this seasonal component and perform cross validation to select the rest of the parameters. An NA value represents a model that cannot be fitted using the CSS-ML method.
+
+First, the following is the matrix of sum of squared errors (SSE) of potential models with the seasonal component fixed at (0,1,1).
+
+```{r,echo=FALSE}
+validation_SSE <- function(data,ar,d,ma,P,D,Q,mtd = "CSS-ML") {
+  train_set <- data[1:438]
+  test_set <- data[438:584]
+  training_fit <- arima(train_set, order = c(ar,d,ma), seasonal = list(order = c(P,D,Q), period = 52), method = mtd)
+  pred.set <- predict(training_fit, n.ahead = 147)$pred #585-438 = 147
+  sse <- sum((pred.set - test_set) ^ 2)
+  return(sse)
+}
+SSE_Matrix <- function(data, ar, d, ma, P, D, Q, mtd = "CSS-ML"){
+  sse.matrix <- sapply(ma, function(ma){
+                  sapply(ar, function(ar){
+                    validation_SSE(data,ar,d,ma,P,D,Q,mtd = "CSS-ML")
+                })})
+  colnames(sse.matrix) <- paste0("MA", "(", ma, ")")
+  rownames(sse.matrix) <- paste0("AR", "(", ar, ")")
+  return(sse.matrix)
+}
+# sse matrix of different models w/ same seasonal component
+cross_validation_set_1 <- SSE_Matrix(data = q5$activity,0:4,2,1:2,0,1,1)
+cross_validation_set_1
+```
+
+The (2,2,2)x(0,1,1) model and the (3,2,2)x(0,1,1) model have the lowest SSEs. We also select a few possible models with different seasonal components and check their SSEs.
+
+```{r, echo = FALSE, warning = FALSE}
+cross_validation_set_2 <- validation_SSE(q5$activity,1,2,2,1,1,0, mtd = "CSS")
+cross_validation_set_3 <- validation_SSE(q5$activity,3,2,2,1,1,0, mtd = "CSS")
+cross_validation_set_4 <- validation_SSE(q5$activity,0,2,2,1,1,1, mtd = "CSS")
+cross_validation_set_5 <- validation_SSE(q5$activity,3,2,1,1,1,1, mtd = "CSS")
+cross_validation_set_6 <- validation_SSE(q5$activity,4,2,1,1,1,1, mtd = "CSS")
+cross_validation_set_2
+cross_validation_set_3
+cross_validation_set_4
+cross_validation_set_5
+cross_validation_set_6
+```
+
+The above five values shows SSE for models of (1,2,2)x(1,1,0), (3,2,2)x(1,1,0), (0,2,2)x(1,1,1), (3,2,1)x(1,1,1), (4,2,1)x(1,1,1), respectively. It can be noticed that none of these models with varying seasonal components from (0,1,1) has a lower SSE than the two we found above. Thus, the model candidates can be limited to $(2,2,2) x (0,1,1)_{52}$ and $(3,2,2) x (0,1,1)_{52}$. We will compare the two models' residual ACF and PACF plots.
+
+```{r, echo=FALSE}
+q5_fit_2 <- arima(q5$activity, order = c(2, 2, 2), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+q5_fit_3 <- arima(q5$activity, order = c(3, 2, 2), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+par(mfrow = c(2,2))
+acf(q5_fit_2$residuals, main = "Residual ACF of ARIMA(2,2,2)")
+pacf(q5_fit_2$residuals, main = "Residual PACF of ARIMA(2,2,2)")
+acf(q5_fit_3$residuals, main = "Residual ACF of ARIMA(3,2,2)")
+pacf(q5_fit_3$residuals, main = "Residual PACF of ARIMA(3,2,2)")
+```
+
+From the plots above, it seems that those of local ARIMA(2, 2, 2) looks more like white noise, especially at lower lags. Since it also has fewer parameters, we fix (2,2,2) as the local component of our model.
+
+```{r, echo = FALSE}
+best.model <- q5_fit_2
+```
+
+Thus our best model for Q5 will be **$ARIMA(2,2,2) x (0,1,1)_{52}$**.
+We will now use this model to predict the next 104 data points of this time series.
+
+## Forecast
+```{r,echo=FALSE}
+par(mfrow = c(1,1))
+q5.pred_lwr<- predict(best.model, n.ahead = 104)$pred - 
+            predict(best.model, n.ahead = 104, interval = 'confidence')$se*1.96
+q5.pred_pred<- predict(best.model, n.ahead = 104)$pred
+q5.pred_upr<- predict(best.model, n.ahead = 104)$pred + 
+            predict(best.model, n.ahead = 104, interval = 'confidence')$se*1.96
+q5.pred <- data.frame(q5.pred_lwr, q5.pred_pred, q5.pred_upr)
+plot.ts(c(q5$activity, q5.pred$q5.pred_pred), main = "Q5 Original + Predicted Data", ylab = "Activity")
+abline(v = 584, col = "blue")
+par(mfrow = c(1,1))
+plot.ts(c(q5$activity, q5.pred$q5.pred_pred), main = "Q5 Original + Predicted Data", ylab = "Activity")
+lines(q5.pred$q5.pred_lwr, col = "skyblue")
+lines(q5.pred$q5.pred_upr, col = "skyblue")
+```
+
+The data points right of the dotted line is the predicted data points. Lastly, we will diagnose our model.
+
+# Diagnostics
+```{r,echo=FALSE}
+tsdiag(best.model)
+write.table(q5.pred, "Q5_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
+
+Figures above shows the residuals has mean zero and has no structure, which resemble behaviors of the white noise. Thus, our model is valid.
+
+## Conclusion
+
+In conclusion, we have produced 104 predictions for the google trends-like data. From a set of models with varying AR and MA parameters through the process of model selection using AIC and cross validation, we finalised our fitting with an $ARIMA (,,) x (,,)_{52}$ model. Plotting the predictions and running tsdiag validated our fit.
+
+\pagebreak
+
+## Appendix
+
+### R Code for the Report & Q5 Forecast
+```{r, eval = FALSE}
+q5 <- read.csv(file = "q5_train.csv", header = TRUE)
+
+plot.ts(q5$activity, ylab = "Activity", main = "Q5 Original Data")
+abline(v = 52 * (1:9), col = "blue")
+
+q5_diff <- diff(diff(diff(q5$activity)), lag = 52)
+plot.ts(q5_diff, ylab = "Activity", main = "Q5 Thrice Differenced Data")
+abline(h = 0, col = "red")
+
+par(mfrow = c(2,1))
+acf(q5_diff, lag.max = 200, main = "ACF of Differenced Data")
+abline(v = c(52,104,156), lty = 3, col = "red")
+pacf(q5_diff, lag.max = 200, main = "PACF of Differenced Data")
+abline(v = c(52,104,156), lty = 3, col = "red")
+
+q5_fit_1st <- arima(q5$activity, order = c(0, 2, 1), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+par(mfrow = c(2,1))
+acf(q5_fit_1st$residuals, lag.max = 200, main = "ACF of Residuals")
+pacf(q5_fit_1st$residuals, lag.max = 200, main = "PACF of Residuals")
+
+ReturnAIC <- function(data, p, d, q, P, D, Q){
+  model <- as.list(tryCatch(arima(data, order = c(p,d,q), seasonal = list(order = c(P,D,Q), period = 52), method = "CSS-ML"), error = function(e){NA}
+  ))
+  if(is.na(model[1])){
+    return(NA)
+  }else{
+    return(model$aic)
+  }
+}
+AIC_Matrix <- function(data, ar, d, ma, P, D, Q){
+  aic.matrix <- sapply(ma, function(q){
+    sapply(ar, function(p){
+      ReturnAIC(data,p,d,q,P,D,Q)
+    })})
+  colnames(aic.matrix) <- paste0("MA", "(", ma, ")")
+  rownames(aic.matrix) <- paste0("AR", "(", ar, ")")
+  return(aic.matrix)
+}
+AIC_Matrix_Seasonal <- function(data, p, d, q, AR, D, MA){
+  aic.matrix <- sapply(MA, function(Q){
+                  sapply(AR, function(P){
+                    ReturnAIC(data,p,d,q,P,D,Q)
+                })})
+  colnames(aic.matrix) <- paste0("Seasonal MA", "(", MA, ")")
+  rownames(aic.matrix) <- paste0("Seasonal AR", "(", AR, ")")
+  return(aic.matrix)
+}
+case1 <- AIC_Matrix(data = q5$activity, 0:4,2,1:2,0,1,1)
+case1
+
+validation_SSE <- function(data,ar,d,ma,P,D,Q,mtd = "CSS-ML") {
+  train_set <- data[1:438]
+  test_set <- data[438:584]
+  training_fit <- arima(train_set, order = c(ar,d,ma), seasonal = list(order = c(P,D,Q), period = 52), method = mtd)
+  pred.set <- predict(training_fit, n.ahead = 132)$pred
+  sse <- sum((pred.set - test_set) ^ 2)
+  return(sse)
+}
+SSE_Matrix <- function(data, ar, d, ma, P, D, Q, mtd = "CSS-ML"){
+  sse.matrix <- sapply(ma, function(ma){
+                  sapply(ar, function(ar){
+                    validation_SSE(data, ar, d, ma, P, D, Q, mtd = "CSS-ML")
+                })})
+  colnames(sse.matrix) <- paste("AR", "(", ma, ")" , sep='')
+  rownames(sse.matrix) <- paste("AR", "(", ar, ")" , sep='')
+  return(sse.matrix)
+}
+cross_validation_set_1 <- SSE_Matrix(data = q5$activity,0:4,2,1:2,0,1,1)
+cross_validation_set_2 <- validation_SSE(q5$activity,1,2,2,1,1,0, mtd = "CSS")
+cross_validation_set_3 <- validation_SSE(q5$activity,3,2,2,1,1,0, mtd = "CSS")
+cross_validation_set_4 <- validation_SSE(q5$activity,0,2,2,1,1,1, mtd = "CSS")
+cross_validation_set_5 <- validation_SSE(q5$activity,3,2,1,1,1,1, mtd = "CSS")
+cross_validation_set_6 <- validation_SSE(q5$activity,4,2,1,1,1,1, mtd = "CSS")
+cross_validation_set_1
+cross_validation_set_2
+cross_validation_set_3
+cross_validation_set_4
+cross_validation_set_5
+cross_validation_set_6
+
+q5_fit_2 <- arima(q5$activity, order = c(2, 2, 2), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+q5_fit_3 <- arima(q5$activity, order = c(3, 2, 2), seasonal = 
+                         list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+par(mfrow = c(2,2))
+acf(q5_fit_2$residuals, main = "Residual ACF of (2,2,2)")
+pacf(q5_fit_2$residuals, main = "Residual PACF of ARIMA(2,2,2)")
+acf(q5_fit_3$residuals, main = "Residual ACF of (3,2,2)")
+pacf(q5_fit_3$residuals, main = "Residual PACF of (3,2,2)")
+
+best.model <- q5_fit_2
+
+par(mfrow = c(1,1))
+q5.pred <- predict(best.model, n.ahead = 104)$pred
+plot.ts(c(q5$activity, q5.pred), main = "Q5 Original + Predicted Data", ylab = "Activity")
+abline(v = 575, col = "blue")
+
+tsdiag(best.model)
+write.table(q5.pred, "Q5_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
+##functions
+```{r}
+
+ReturnAIC <- function(data, p, d, q, P, D, Q){
+  model <- as.list(tryCatch(arima(data, order = c(p,d,q), seasonal = list(order = c(P,D,Q), period = 52), method = "CSS-ML"), error = function(e){NA}
+  ))
+  if(is.na(model[1])){
+    return(NA)
+  }else{
+    return(model$aic)
+  }
+}
+AIC_Matrix <- function(data, ar, d, ma, P, D, Q){
+  aic.matrix <- sapply(ma, function(q){
+    sapply(ar, function(p){
+      ReturnAIC(data,p,d,q,P,D,Q)
+    })})
+  colnames(aic.matrix) <- paste0("MA", "(", ma, ")")
+  rownames(aic.matrix) <- paste0("AR", "(", ar, ")")
+  return(aic.matrix)
+}
+AIC_Matrix_Seasonal <- function(data, p, d, q, AR, D, MA){
+  aic.matrix <- sapply(MA, function(Q){
+                  sapply(AR, function(P){
+                    ReturnAIC(data,p,d,q,P,D,Q)
+                })})
+  colnames(aic.matrix) <- paste0("Seasonal MA", "(", MA, ")")
+  rownames(aic.matrix) <- paste0("Seasonal AR", "(", AR, ")")
+  return(aic.matrix)
+}
+
+validation_SSE <- function(data,ar,d,ma,P,D,Q,mtd = "CSS-ML") {
+  train_set <- data[1:438]
+  test_set <- data[438:584]
+  training_fit <- arima(train_set, order = c(ar,d,ma), seasonal = list(order = c(P,D,Q), period = 52), method = mtd)
+  pred.set <- predict(training_fit, n.ahead = 132)$pred
+  sse <- sum((pred.set - test_set) ^ 2)
+  return(sse)
+}
+SSE_Matrix <- function(data, ar, d, ma, P, D, Q, mtd = "CSS-ML"){
+  sse.matrix <- sapply(ma, function(ma){
+                  sapply(ar, function(ar){
+                    validation_SSE(data, ar, d, ma, P, D, Q, mtd = "CSS-ML")
+                })})
+  colnames(sse.matrix) <- paste("AR", "(", ma, ")" , sep='')
+  rownames(sse.matrix) <- paste("AR", "(", ar, ")" , sep='')
+  return(sse.matrix)
+}
+```
+
+### R Code for Q1 Forecast
+```{r, eval = FALSE}
+setwd("/Users/hyung/documents/R/Data/Class/Stat153/MT2")
+q1 <- read.csv(file = "q1_train.csv", header = TRUE)
+plot.ts(q1$activity, xlab = "Time in Weeks", ylab = "Activity", main = "Q1 Time Series")
+
+min(q1$activity)
+q1$logactivity <- log(q1$activity + 2.5)
+plot.ts(q1$logactivity, xlab = "Weekly Time", ylab = "Log Activity", main = "Log Transformed Q1 Data")
+
+diff.q1 <- diff(diff(q1$logactivity, lag = 52))
+plot(diff.q1, xlab = "Weekly Time", ylab = "Log Activity", 
+     main = "Twice Differenced Log Transformed Q1 Data", type = "l")
+abline(h=0, col = "red")
+mean(diff.q1)
+
+acf(diff.q1, lag.max = 320)
+acf(diff.q1, lag.max = 20)
+abline(v = c(52,104,156,208), col = "red", lty = 2)
+pacf(diff.q1, lag.max = 320)
+pacf(diff.q1, lag.max = 20)
+abline(v = c(52,104,156,208), col = "red", lty = 2)
+
+#seasonal(3,1,3)?
+#local(0,1,1)?
+#ARMA (1, 1, 0) x (P, 1, Q)
+#ARMA (0, 1, 1) x (P, 1, Q)
+#ARMA (1, 1, 1) x (P, 1, Q)
+#ARMA (2, 1, 1) x (P, 1, Q)
+
+AR <- c(0:3)
+MA <- c(0:3)
+case1 <- AIC_Matrix_Seasonal(q1$logactivity, 0,1,1,AR,1,MA)
+case2 <- AIC_Matrix_Seasonal(q1$logactivity, 1,1,0,AR,1,MA)
+case3 <- AIC_Matrix_Seasonal(q1$logactivity, 1,1,1,AR,1,MA)
+case4 <- AIC_Matrix_Seasonal(q1$logactivity, 2,1,1,AR,1,MA)
+
+#(0,1,1)x(2,1,3)(52) seem best
+
+q1_fit <- arima(q1$logactivity, order = c(0,1,1), 
+                   seasonal = list(order = c(2,1,3), period = 52), method = "CSS-ML")
+
+q1.pred_pred <- predict(q1_fit, n.ahead = 104)$pred
+
+q1.pred_lwr<- predict(q1_fit, n.ahead = 104)$pred - 
+            predict(q1_fit, n.ahead = 104, interval = 'confidence')$se*1.96
+q1.pred_upr<- predict(q1_fit, n.ahead = 104)$pred + 
+            predict(q1_fit, n.ahead = 104, interval = 'confidence')$se*1.96
+q1.pred <- data.frame(exp(q1.pred_lwr)-2.5, exp(q1.pred_pred)-2.5, exp(q1.pred_upr)-2.5)
+
+
+plot(forecast(arima.fit))
+
+fcast.original <- exp(fcast$pred)-2.5
+t <- c(1:(length(q1$activity)+104))
+plot(t,c(q1$activity,q1.pred_pred), type = "l")
+abline(v=526, col = "red")
+
+write.table(q1.pred, "Q1_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
+
+### R Code for Q2 Prediction
+```{r, eval = FALSE}
+q2 <- read.csv(file = "q2_train.csv", header = TRUE)
+
+plot.ts(q2$activity)
+abline(v=52*(1:9))
+q2_diff <- diff(diff(diff(q2$activity, lag = 52)))
+plot.ts(q2_diff)
+acf(q2_diff, lag.max = 200)
+abline(v=52*(1:3), lty = 3, col = "red")
+pacf(q2_diff, lag.max = 200)
+abline(v=52*(1:3), lty = 3, col = "red")
+
+AIC_Matrix(data = q2$activity,0:4,2,1:2,0,1,1)
+SSE_Matrix(data = q2$activity,0:4,2,1:2,0,1,1)
+
+q2_fit_1 <- arima(q2$activity, order = c(1, 2, 2), seasonal = 
+                    list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+acf(q2_fit_1$residuals, lag.max = 200)
+pacf(q2_fit_1$residuals, lag.max = 200)
+
+q2.pred_pred <- predict(q2_fit_1, n.ahead = 104)$pred
+q2.pred_lwr<- predict(q2_fit_1, n.ahead = 104)$pred - 
+            predict(q2_fit_1, n.ahead = 104, interval = 'confidence')$se*1.96
+q2.pred_upr<- predict(q2_fit_1, n.ahead = 104)$pred + 
+            predict(q2_fit_1, n.ahead = 104, interval = 'confidence')$se*1.96
+q2.pred <- data.frame(q2.pred_lwr, q2.pred_pred, q2.pred_upr)
+
+
+plot.ts(c(q2$activity, q2.pred), main = "q2 Original + Predicted Data", ylab = "activity")
+abline(v = 575, lty = 3, col = "red")
+
+write.table(q2.pred, "Q2_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
+
+### R Code for Q3 Forecast
+```{r, eval = FALSE}
+setwd("/Users/hyung/documents/R/Data/Class/Stat153/MT2")
+q3 <- read.csv(file = "q3_train.csv", header = TRUE)
+plot.ts(q3$activity)
+abline(v=52*(1:9))
+q3_diff <- diff(diff(diff(q3$activity, lag = 52)))
+plot.ts(q3_diff)
+acf(q3_diff, lag.max = 200)
+abline(v=52*(1:3), lty = 3, col = "red")
+pacf(q3_diff, lag.max = 200)
+abline(v=52*(1:3), lty = 3, col = "red")
+AIC_Matrix(data = q3$activity,0:4,2,1:2,0,1,1)
+SSE_Matrix(data = q3$activity,0:4,2,1:2,0,1,1)
+q3_fit_1 <- arima(q3$activity, order = c(1, 2, 2), seasonal = 
+                    list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+acf(q3_fit_1$residuals, lag.max = 200)
+pacf(q3_fit_1$residuals, lag.max = 200)
+
+q3_fit_2 <- arima(q3$activity, order = c(1, 2, 2), seasonal = 
+                    list(order = c(1, 1, 1), period = 52), method = "CSS")
+
+validation_SSE(data = q3$activity,1,2,2,1,1,1,mtd = "CSS")
+
+q3_fit_1 <- arima(q3$activity, order = c(1, 2, 2), seasonal = 
+                    list(order = c(0, 1, 1), period = 52), method = "CSS-ML")
+q3.pred <- predict(q3_fit_1, n.ahead = 104)$pred
+q3.pred_pred <- predict(q3_fit_1, n.ahead = 104)$pred
+q3.pred_lwr<- predict(q3_fit_1, n.ahead = 104)$pred - 
+            predict(q3_fit_1, n.ahead = 104, interval = 'confidence')$se*1.96
+q3.pred_upr<- predict(q3_fit_1, n.ahead = 104)$pred + 
+            predict(q3_fit_1, n.ahead = 104, interval = 'confidence')$se*1.96
+q3.pred <- data.frame(q3.pred_lwr, q3.pred_pred, q3.pred_upr)
+
+
+plot.ts(c(q3$activity, q3.pred), main = "q3 Original + Predicted Data", ylab = "activity")
+abline(v = 525, lty = 3, col = "red")
+
+write.table(q3.pred, "Q3_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
+
+### R Code for Q4 Prediction
+```{r, eval = FALSE}
+setwd("/Users/hyung/documents/R/Data/Class/Stat153/MT2")
+q4 <- read.csv(file = "q4_train.csv", header = TRUE)
+
+library("forecast")
+plot.ts(q4$activity, xlab = "Time in Weeks", ylab = "Activity", main = "Q4 Time Series")
+
+diff.q4 <- diff(q4$activity)
+plot(diff.q4, xlab = "Weekly Time", ylab = "Activity", 
+     main = "Differenced Q4 Data", type = "l")
+abline(h=0, col = "red")
+mean(diff.q4)
+
+acf(diff.q4, lag.max = 320)
+acf(diff.q4, lag.max = 20)
+pacf(diff.q4, lag.max = 320)
+pacf(diff.q4, lag.max = 20)
+
+#Seems like ARIMA(2,1,1) with no seasonal component
+ar <- c(0:3)
+ma <- c(0:3)
+q4_case1 <- AIC_Matrix(q4$activity,ar,1,ma,0,0,0)
+q4_case2 <- AIC_Matrix(q4$activity,ar,1,ma,1,0,0)
+q4_case3 <- AIC_Matrix(q4$activity,ar,1,ma,2,0,0)
+q4_case4 <- AIC_Matrix(q4$activity,ar,1,ma,1,0,1)
+
+q4_case1
+q4_case2
+q4_case3
+q4_case4
+#Seems like seasonal(1,0,0) may be the correct seasonal portion
+q4.validation <- SSE_Matrix(q4$activity,ar,1,ma,1,0,0, mtd = "CSS")
+q4.validation
+#ARMA(1,1) seems the most reasonable
+#Try other possibilities
+validation_SSE(q4$activity,1,1,1,0,0,0, mtd = "CSS")
+validation_SSE(q4$activity,3,1,1,0,0,0, mtd = "CSS")
+validation_SSE(q4$activity,1,1,1,2,0,0, mtd = "CSS")
+validation_SSE(q4$activity,3,1,1,1,0,1, mtd = "CSS")
+#(1,1,1)x(1,0,0)(52) has the lowest SSE
+q4_fit <- arima(q4$activity, order = c(1, 1, 1), seasonal = 
+                    list(order = c(1, 0, 0), period = 52), method = "CSS")
+
+q4_fit <- arima(q4$activity, order = c(1,1,1), seasonal = list(order = c(1,0,0),
+                     period = 52, method = "CSS"))
+
+q4.pred <- predict(q4_fit, n.ahead = 104)$pred
+q4.pred_pred <- predict(q4_fit, n.ahead = 104)$pred
+q4.pred_lwr<- predict(q4_fit, n.ahead = 104)$pred - 
+            predict(q4_fit, n.ahead = 104, interval = 'confidence')$se*1.96
+q4.pred_upr<- predict(q4_fit, n.ahead = 104)$pred + 
+            predict(q4_fit, n.ahead = 104, interval = 'confidence')$se*1.96
+q4.pred <- data.frame(q4.pred_lwr, q4.pred_pred, q4.pred_upr)
+t <- c(1:(length(q4$activity)+104))
+plot(t,c(q4$activity,q4.pred$q4.pred_pred), type = "l")
+abline(v=526, col = "red")
+
+write.table(q4.pred, "Q4_junz2703_23074461.txt", sep = ",", row.names = FALSE, col.names = FALSE)
+```
